@@ -3,13 +3,15 @@ import io
 import os
 import time
 import traceback
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import runpod
 import torch
 from diffusers import AutoPipelineForText2Image, EulerAncestralDiscreteScheduler
 
 MODEL_ID = os.getenv("MODEL_ID", "RunDiffusion/Juggernaut-XL-v9")
+MODEL_VARIANT = (os.getenv("MODEL_VARIANT", "fp16").strip() or None)
+
 DEFAULT_WIDTH = int(os.getenv("DEFAULT_WIDTH", "1024"))
 DEFAULT_HEIGHT = int(os.getenv("DEFAULT_HEIGHT", "1024"))
 DEFAULT_STEPS = int(os.getenv("DEFAULT_STEPS", "25"))
@@ -53,6 +55,7 @@ def _clamp_int(value: Any, default: int, min_value: int, max_value: int) -> int:
         number = int(value)
     except Exception:
         number = default
+
     return max(min_value, min(number, max_value))
 
 
@@ -61,20 +64,27 @@ def _clamp_float(value: Any, default: float, min_value: float, max_value: float)
         number = float(value)
     except Exception:
         number = default
+
     return max(min_value, min(number, max_value))
 
 
 def load_pipeline():
     global PIPE
+
     if PIPE is not None:
         return PIPE
 
     start = time.time()
-    _log(f"[BOOT] Loading image model={MODEL_ID} device={DEVICE}")
+
+    _log(
+        f"[BOOT] Loading image model={MODEL_ID} "
+        f"variant={MODEL_VARIANT} device={DEVICE}"
+    )
 
     pipe = AutoPipelineForText2Image.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+        variant=MODEL_VARIANT,
         use_safetensors=True,
     )
 
@@ -86,6 +96,7 @@ def load_pipeline():
     if DEVICE == "cuda":
         if USE_CPU_OFFLOAD:
             pipe.enable_model_cpu_offload()
+            _log("[BOOT] CPU offload enabled")
         else:
             pipe.to("cuda")
 
@@ -96,6 +107,7 @@ def load_pipeline():
             _log(f"[BOOT] xformers unavailable, continuing without it: {exc}")
     else:
         pipe.to("cpu")
+        _log("[BOOT] CUDA unavailable, running on CPU")
 
     try:
         pipe.set_progress_bar_config(disable=True)
@@ -103,6 +115,7 @@ def load_pipeline():
         pass
 
     PIPE = pipe
+
     _log(f"[BOOT] Image model ready in {round(time.time() - start, 2)}s")
     return PIPE
 
@@ -130,7 +143,7 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("guidance_scale") or payload.get("guidanceScale"),
         DEFAULT_GUIDANCE_SCALE,
         1.0,
-        12.0
+        12.0,
     )
 
     if payload.get("seed") is None:
@@ -140,13 +153,18 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         pipe = load_pipeline()
+
         generator = (
             torch.Generator(device=DEVICE).manual_seed(seed)
             if DEVICE == "cuda"
             else torch.Generator().manual_seed(seed)
         )
 
-        _log(f"[JOB] image generation started width={width} height={height} steps={steps} seed={seed}")
+        _log(
+            f"[JOB] image generation started "
+            f"width={width} height={height} steps={steps} "
+            f"guidance_scale={guidance_scale} seed={seed}"
+        )
 
         with torch.inference_mode():
             image = pipe(
@@ -160,6 +178,7 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
             ).images[0]
 
         buffer = io.BytesIO()
+
         fmt = "JPEG" if OUTPUT_FORMAT in {"jpg", "jpeg"} else "PNG"
         mime_type = "image/jpeg" if fmt == "JPEG" else "image/png"
 
@@ -171,6 +190,7 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
         elapsed_ms = int((time.time() - started) * 1000)
+
         _log(f"[JOB] image generation completed elapsed_ms={elapsed_ms} seed={seed}")
 
         return {
@@ -183,15 +203,18 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
             "steps": steps,
             "guidance_scale": guidance_scale,
             "model": MODEL_ID,
+            "variant": MODEL_VARIANT,
             "elapsed_ms": elapsed_ms,
         }
 
     except Exception as exc:
         traceback.print_exc()
+
         return {
             "error": str(exc),
             "trace": traceback.format_exc()[-2500:],
             "model": MODEL_ID,
+            "variant": MODEL_VARIANT,
             "elapsed_ms": int((time.time() - started) * 1000),
         }
 
