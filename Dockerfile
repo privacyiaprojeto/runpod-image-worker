@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TRANSFORMERS_CACHE=/runpod-volume/huggingface \
     DIFFUSERS_CACHE=/runpod-volume/huggingface \
     HF_HUB_DISABLE_XET=1 \
-    TMPDIR=/runpod-volume/tmp
+    HF_HUB_ENABLE_HF_TRANSFER=0
 
 WORKDIR /app
 

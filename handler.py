@@ -1,30 +1,35 @@
 import base64
 import io
 import os
+import shutil
 import time
 import traceback
 from typing import Any, Dict
+
+# ============================================================
+# Cache/volume config precisa vir antes de carregar o modelo
+# ============================================================
+
+CACHE_ROOT = os.getenv("HF_HOME", "/runpod-volume/huggingface").strip() or "/runpod-volume/huggingface"
+HUB_CACHE = os.getenv("HUGGINGFACE_HUB_CACHE", os.path.join(CACHE_ROOT, "hub")).strip()
+TMP_ROOT = os.getenv("TMPDIR", "/runpod-volume/tmp").strip() or "/runpod-volume/tmp"
+
+os.makedirs(CACHE_ROOT, exist_ok=True)
+os.makedirs(HUB_CACHE, exist_ok=True)
+os.makedirs(TMP_ROOT, exist_ok=True)
+
+os.environ["HF_HOME"] = CACHE_ROOT
+os.environ["HUGGINGFACE_HUB_CACHE"] = HUB_CACHE
+os.environ["TRANSFORMERS_CACHE"] = os.getenv("TRANSFORMERS_CACHE", CACHE_ROOT)
+os.environ["DIFFUSERS_CACHE"] = os.getenv("DIFFUSERS_CACHE", CACHE_ROOT)
+os.environ["HF_HUB_DISABLE_XET"] = os.getenv("HF_HUB_DISABLE_XET", "1")
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = os.getenv("HF_HUB_ENABLE_HF_TRANSFER", "0")
+os.environ["TMPDIR"] = TMP_ROOT
 
 import runpod
 import torch
 from diffusers import AutoPipelineForText2Image, EulerAncestralDiscreteScheduler
 
-CACHE_ROOT = os.getenv("HF_HOME", "/runpod-volume/huggingface")
-TMP_ROOT = os.getenv("TMPDIR", "/runpod-volume/tmp")
-
-os.makedirs(CACHE_ROOT, exist_ok=True)
-os.makedirs(os.path.join(CACHE_ROOT, "hub"), exist_ok=True)
-os.makedirs(TMP_ROOT, exist_ok=True)
-
-os.environ["HF_HOME"] = CACHE_ROOT
-os.environ["HUGGINGFACE_HUB_CACHE"] = os.getenv(
-    "HUGGINGFACE_HUB_CACHE",
-    os.path.join(CACHE_ROOT, "hub")
-)
-os.environ["TRANSFORMERS_CACHE"] = os.getenv("TRANSFORMERS_CACHE", CACHE_ROOT)
-os.environ["DIFFUSERS_CACHE"] = os.getenv("DIFFUSERS_CACHE", CACHE_ROOT)
-os.environ["HF_HUB_DISABLE_XET"] = os.getenv("HF_HUB_DISABLE_XET", "1")
-os.environ["TMPDIR"] = TMP_ROOT
 
 MODEL_ID = os.getenv("MODEL_ID", "RunDiffusion/Juggernaut-XL-v9")
 MODEL_VARIANT = (os.getenv("MODEL_VARIANT", "fp16").strip() or None)
@@ -49,6 +54,17 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def _log(message: str) -> None:
     print(message, flush=True)
+
+
+def _disk_report(path: str) -> str:
+    try:
+        usage = shutil.disk_usage(path)
+        total_gb = round(usage.total / (1024 ** 3), 2)
+        free_gb = round(usage.free / (1024 ** 3), 2)
+        used_gb = round(usage.used / (1024 ** 3), 2)
+        return f"path={path} total_gb={total_gb} used_gb={used_gb} free_gb={free_gb}"
+    except Exception as exc:
+        return f"path={path} disk_report_error={exc}"
 
 
 def _sanitize_prompt(value: Any, max_len: int = 1600) -> str:
@@ -93,13 +109,18 @@ def load_pipeline():
 
     start = time.time()
 
-    _log(
-        f"[BOOT] Loading image model={MODEL_ID} "
-        f"variant={MODEL_VARIANT} device={DEVICE}"
-    )
-_log(f"[BOOT] HF_HOME={os.environ.get('HF_HOME')}")
-_log(f"[BOOT] HUGGINGFACE_HUB_CACHE={os.environ.get('HUGGINGFACE_HUB_CACHE')}")
-_log(f"[BOOT] TMPDIR={os.environ.get('TMPDIR')}")
+    _log("[BOOT] Starting lazy model load")
+    _log(f"[BOOT] MODEL_ID={MODEL_ID}")
+    _log(f"[BOOT] MODEL_VARIANT={MODEL_VARIANT}")
+    _log(f"[BOOT] DEVICE={DEVICE}")
+    _log(f"[BOOT] HF_HOME={os.environ.get('HF_HOME')}")
+    _log(f"[BOOT] HUGGINGFACE_HUB_CACHE={os.environ.get('HUGGINGFACE_HUB_CACHE')}")
+    _log(f"[BOOT] TRANSFORMERS_CACHE={os.environ.get('TRANSFORMERS_CACHE')}")
+    _log(f"[BOOT] DIFFUSERS_CACHE={os.environ.get('DIFFUSERS_CACHE')}")
+    _log(f"[BOOT] TMPDIR={os.environ.get('TMPDIR')}")
+    _log(f"[BOOT] DISK_CACHE_ROOT {_disk_report(CACHE_ROOT)}")
+    _log(f"[BOOT] DISK_TMP_ROOT {_disk_report(TMP_ROOT)}")
+
     pipe = AutoPipelineForText2Image.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
@@ -139,38 +160,36 @@ _log(f"[BOOT] TMPDIR={os.environ.get('TMPDIR')}")
     return PIPE
 
 
-load_pipeline()
-
-
 def handler(event: Dict[str, Any]) -> Dict[str, Any]:
     started = time.time()
-    payload = event.get("input") or {}
-
-    prompt = _sanitize_prompt(payload.get("prompt"))
-    if not prompt:
-        return {"error": "prompt obrigatório"}
-
-    negative_prompt = _sanitize_prompt(
-        payload.get("negative_prompt") or payload.get("negativePrompt") or DEFAULT_NEGATIVE_PROMPT,
-        max_len=1200,
-    )
-
-    width = _clamp_dimension(payload.get("width"), DEFAULT_WIDTH, MAX_WIDTH)
-    height = _clamp_dimension(payload.get("height"), DEFAULT_HEIGHT, MAX_HEIGHT)
-    steps = _clamp_int(payload.get("steps"), DEFAULT_STEPS, 8, 50)
-    guidance_scale = _clamp_float(
-        payload.get("guidance_scale") or payload.get("guidanceScale"),
-        DEFAULT_GUIDANCE_SCALE,
-        1.0,
-        12.0,
-    )
-
-    if payload.get("seed") is None:
-        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-    else:
-        seed = _clamp_int(payload.get("seed"), 0, 0, 2**31 - 1)
 
     try:
+        payload = event.get("input") or {}
+
+        prompt = _sanitize_prompt(payload.get("prompt"))
+        if not prompt:
+            return {"error": "prompt obrigatório"}
+
+        negative_prompt = _sanitize_prompt(
+            payload.get("negative_prompt") or payload.get("negativePrompt") or DEFAULT_NEGATIVE_PROMPT,
+            max_len=1200,
+        )
+
+        width = _clamp_dimension(payload.get("width"), DEFAULT_WIDTH, MAX_WIDTH)
+        height = _clamp_dimension(payload.get("height"), DEFAULT_HEIGHT, MAX_HEIGHT)
+        steps = _clamp_int(payload.get("steps"), DEFAULT_STEPS, 1, 50)
+        guidance_scale = _clamp_float(
+            payload.get("guidance_scale") or payload.get("guidanceScale"),
+            DEFAULT_GUIDANCE_SCALE,
+            1.0,
+            12.0,
+        )
+
+        if payload.get("seed") is None:
+            seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+        else:
+            seed = _clamp_int(payload.get("seed"), 0, 0, 2**31 - 1)
+
         pipe = load_pipeline()
 
         generator = (
@@ -238,4 +257,5 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+_log("[BOOT] Worker process started. Waiting for RunPod jobs.")
 runpod.serverless.start({"handler": handler})
