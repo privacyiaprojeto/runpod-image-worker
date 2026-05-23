@@ -9,6 +9,23 @@ import runpod
 import torch
 from diffusers import AutoPipelineForText2Image, EulerAncestralDiscreteScheduler
 
+CACHE_ROOT = os.getenv("HF_HOME", "/runpod-volume/huggingface")
+TMP_ROOT = os.getenv("TMPDIR", "/runpod-volume/tmp")
+
+os.makedirs(CACHE_ROOT, exist_ok=True)
+os.makedirs(os.path.join(CACHE_ROOT, "hub"), exist_ok=True)
+os.makedirs(TMP_ROOT, exist_ok=True)
+
+os.environ["HF_HOME"] = CACHE_ROOT
+os.environ["HUGGINGFACE_HUB_CACHE"] = os.getenv(
+    "HUGGINGFACE_HUB_CACHE",
+    os.path.join(CACHE_ROOT, "hub")
+)
+os.environ["TRANSFORMERS_CACHE"] = os.getenv("TRANSFORMERS_CACHE", CACHE_ROOT)
+os.environ["DIFFUSERS_CACHE"] = os.getenv("DIFFUSERS_CACHE", CACHE_ROOT)
+os.environ["HF_HUB_DISABLE_XET"] = os.getenv("HF_HUB_DISABLE_XET", "1")
+os.environ["TMPDIR"] = TMP_ROOT
+
 MODEL_ID = os.getenv("MODEL_ID", "RunDiffusion/Juggernaut-XL-v9")
 MODEL_VARIANT = (os.getenv("MODEL_VARIANT", "fp16").strip() or None)
 
@@ -80,7 +97,9 @@ def load_pipeline():
         f"[BOOT] Loading image model={MODEL_ID} "
         f"variant={MODEL_VARIANT} device={DEVICE}"
     )
-
+_log(f"[BOOT] HF_HOME={os.environ.get('HF_HOME')}")
+_log(f"[BOOT] HUGGINGFACE_HUB_CACHE={os.environ.get('HUGGINGFACE_HUB_CACHE')}")
+_log(f"[BOOT] TMPDIR={os.environ.get('TMPDIR')}")
     pipe = AutoPipelineForText2Image.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,

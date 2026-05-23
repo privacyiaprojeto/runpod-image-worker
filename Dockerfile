@@ -3,9 +3,12 @@ FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/workspace/.cache/huggingface \
-    TRANSFORMERS_CACHE=/workspace/.cache/huggingface \
-    DIFFUSERS_CACHE=/workspace/.cache/huggingface
+    HF_HOME=/runpod-volume/huggingface \
+    HUGGINGFACE_HUB_CACHE=/runpod-volume/huggingface/hub \
+    TRANSFORMERS_CACHE=/runpod-volume/huggingface \
+    DIFFUSERS_CACHE=/runpod-volume/huggingface \
+    HF_HUB_DISABLE_XET=1 \
+    TMPDIR=/runpod-volume/tmp
 
 WORKDIR /app
 
