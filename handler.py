@@ -60,7 +60,10 @@ IP_ADAPTER_REPO = os.getenv("IP_ADAPTER_REPO", "h94/IP-Adapter")
 IP_ADAPTER_SUBFOLDER = os.getenv("IP_ADAPTER_SUBFOLDER", "sdxl_models")
 IP_ADAPTER_WEIGHT_NAME = os.getenv("IP_ADAPTER_WEIGHT_NAME", "ip-adapter-plus_sdxl_vit-h.safetensors")
 IP_ADAPTER_IMAGE_ENCODER_FOLDER = os.getenv("IP_ADAPTER_IMAGE_ENCODER_FOLDER", "models/image_encoder")
-IP_ADAPTER_SCALE = float(os.getenv("IP_ADAPTER_SCALE", "0.65"))
+IP_ADAPTER_SCALE = float(os.getenv("IP_ADAPTER_SCALE", "0.35"))
+IP_ADAPTER_SCALE_FULL_BODY = float(os.getenv("IP_ADAPTER_SCALE_FULL_BODY", "0.22"))
+IP_ADAPTER_SCALE_MIN = float(os.getenv("IP_ADAPTER_SCALE_MIN", "0.15"))
+IP_ADAPTER_SCALE_MAX = float(os.getenv("IP_ADAPTER_SCALE_MAX", "0.55"))
 
 USE_CONTROLNET_OPENPOSE = os.getenv("USE_CONTROLNET_OPENPOSE", "false").lower().strip() == "true"
 CONTROLNET_STRICT = os.getenv("CONTROLNET_STRICT", "false").lower().strip() == "true"
@@ -102,6 +105,39 @@ def _sanitize_prompt(value: Any, max_len: int = 2200) -> str:
     return text[:max_len]
 
 
+def _lower_text(value: Any) -> str:
+    return str(value or "").lower()
+
+
+def _contains_any(value: Any, terms) -> bool:
+    source = _lower_text(value)
+    return any(term.lower() in source for term in terms)
+
+
+def _resolve_identity_scale(prompt: str, payload: Dict[str, Any]) -> float:
+    raw_override = payload.get("ip_adapter_scale") or payload.get("identity_scale") or payload.get("identityScale")
+
+    if raw_override is not None:
+        return _clamp_float(raw_override, IP_ADAPTER_SCALE, IP_ADAPTER_SCALE_MIN, IP_ADAPTER_SCALE_MAX)
+
+    requested_full_body = _contains_any(
+        prompt,
+        [
+            "full body",
+            "entire body visible",
+            "head to toe",
+            "corpo inteiro",
+            "visible legs",
+            "visible feet",
+        ],
+    )
+
+    if requested_full_body:
+        return _clamp_float(IP_ADAPTER_SCALE_FULL_BODY, 0.22, IP_ADAPTER_SCALE_MIN, IP_ADAPTER_SCALE_MAX)
+
+    return _clamp_float(IP_ADAPTER_SCALE, 0.35, IP_ADAPTER_SCALE_MIN, IP_ADAPTER_SCALE_MAX)
+
+
 def _clamp_dimension(value: Any, default: int, max_value: int) -> int:
     try:
         number = int(value)
@@ -140,7 +176,7 @@ def _read_first_string(*values: Any) -> str:
 def _download_bytes(url: str) -> bytes:
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "runpod-image-worker/0.2.0"},
+        headers={"User-Agent": "runpod-image-worker/0.2.2"},
     )
 
     with urllib.request.urlopen(request, timeout=REFERENCE_IMAGE_TIMEOUT_SECONDS) as response:
@@ -446,7 +482,15 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
             "generator": generator,
         }
 
+        identity_scale = None
         if identity_enabled and getattr(pipe, "_identity_adapter_ready", False):
+            identity_scale = _resolve_identity_scale(prompt, payload)
+            try:
+                pipe.set_ip_adapter_scale(identity_scale)
+            except Exception as exc:
+                _log(f"[JOB] falha ao ajustar IP-Adapter scale em runtime: {exc}")
+                if IP_ADAPTER_STRICT:
+                    raise
             generation_kwargs["ip_adapter_image"] = identity_image
         elif identity_enabled and IP_ADAPTER_STRICT:
             raise RuntimeError("IP-Adapter solicitado, mas não ficou pronto no pipeline")
@@ -460,6 +504,7 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
             f"width={width} height={height} steps={steps} "
             f"guidance_scale={guidance_scale} seed={seed} "
             f"identity_enabled={identity_enabled} "
+            f"identity_scale={identity_scale} "
             f"ip_adapter_ready={getattr(pipe, '_identity_adapter_ready', False)} "
             f"controlnet_enabled={controlnet_enabled}"
         )
@@ -497,6 +542,7 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
             "steps": steps,
             "guidance_scale": guidance_scale,
             "identity_enabled": identity_enabled,
+            "identity_scale": identity_scale,
             "identity_used": identity_used,
             "identity_fallback_reason": identity_fallback_reason,
             "ip_adapter_ready": getattr(pipe, "_identity_adapter_ready", False),
