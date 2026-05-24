@@ -59,6 +59,7 @@ IP_ADAPTER_STRICT = os.getenv("IP_ADAPTER_STRICT", "false").lower().strip() == "
 IP_ADAPTER_REPO = os.getenv("IP_ADAPTER_REPO", "h94/IP-Adapter")
 IP_ADAPTER_SUBFOLDER = os.getenv("IP_ADAPTER_SUBFOLDER", "sdxl_models")
 IP_ADAPTER_WEIGHT_NAME = os.getenv("IP_ADAPTER_WEIGHT_NAME", "ip-adapter-plus_sdxl_vit-h.safetensors")
+IP_ADAPTER_IMAGE_ENCODER_FOLDER = os.getenv("IP_ADAPTER_IMAGE_ENCODER_FOLDER", "models/image_encoder")
 IP_ADAPTER_SCALE = float(os.getenv("IP_ADAPTER_SCALE", "0.65"))
 
 USE_CONTROLNET_OPENPOSE = os.getenv("USE_CONTROLNET_OPENPOSE", "false").lower().strip() == "true"
@@ -264,12 +265,14 @@ def _configure_pipeline(pipe, *, use_ip_adapter: bool):
         try:
             _log(
                 f"[BOOT] Loading IP-Adapter repo={IP_ADAPTER_REPO} "
-                f"subfolder={IP_ADAPTER_SUBFOLDER} weight={IP_ADAPTER_WEIGHT_NAME} scale={IP_ADAPTER_SCALE}"
+                f"subfolder={IP_ADAPTER_SUBFOLDER} weight={IP_ADAPTER_WEIGHT_NAME} "
+                f"image_encoder_folder={IP_ADAPTER_IMAGE_ENCODER_FOLDER} scale={IP_ADAPTER_SCALE}"
             )
             pipe.load_ip_adapter(
                 IP_ADAPTER_REPO,
                 subfolder=IP_ADAPTER_SUBFOLDER,
                 weight_name=IP_ADAPTER_WEIGHT_NAME,
+                image_encoder_folder=IP_ADAPTER_IMAGE_ENCODER_FOLDER,
             )
             pipe.set_ip_adapter_scale(IP_ADAPTER_SCALE)
             pipe._identity_adapter_ready = True
@@ -346,6 +349,25 @@ def load_controlnet_pipeline(*, use_ip_adapter: bool):
     CONTROLNET_PIPE = _configure_pipeline(pipe, use_ip_adapter=use_ip_adapter)
     _log(f"[BOOT] ControlNet image model ready in {round(time.time() - start, 2)}s")
     return CONTROLNET_PIPE
+
+
+def _run_generation_with_identity_fallback(pipe, generation_kwargs: Dict[str, Any], *, identity_enabled: bool):
+    try:
+        return pipe(**generation_kwargs).images[0], identity_enabled, None
+    except RuntimeError as exc:
+        message = str(exc)
+        is_ip_adapter_shape_error = "mat1 and mat2 shapes cannot be multiplied" in message
+
+        if identity_enabled and is_ip_adapter_shape_error and not IP_ADAPTER_STRICT:
+            _log(
+                "[JOB] IP-Adapter runtime shape mismatch; "
+                "retrying once without identity adapter because IP_ADAPTER_STRICT=false"
+            )
+            fallback_kwargs = dict(generation_kwargs)
+            fallback_kwargs.pop("ip_adapter_image", None)
+            return pipe(**fallback_kwargs).images[0], False, message
+
+        raise
 
 
 def handler(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -443,7 +465,11 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         )
 
         with torch.inference_mode():
-            image = pipe(**generation_kwargs).images[0]
+            image, identity_used, identity_fallback_reason = _run_generation_with_identity_fallback(
+                pipe,
+                generation_kwargs,
+                identity_enabled=identity_enabled and getattr(pipe, "_identity_adapter_ready", False),
+            )
 
         buffer = io.BytesIO()
 
@@ -471,6 +497,8 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
             "steps": steps,
             "guidance_scale": guidance_scale,
             "identity_enabled": identity_enabled,
+            "identity_used": identity_used,
+            "identity_fallback_reason": identity_fallback_reason,
             "ip_adapter_ready": getattr(pipe, "_identity_adapter_ready", False),
             "controlnet_enabled": controlnet_enabled,
             "controlnet_conditioning_scale": CONTROLNET_CONDITIONING_SCALE if controlnet_enabled else None,
